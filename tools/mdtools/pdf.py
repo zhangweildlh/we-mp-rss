@@ -44,6 +44,7 @@
 """
 import asyncio
 import sys
+import os
 import atexit
 from typing import Optional, Dict, Any
 from pathlib import Path
@@ -96,9 +97,16 @@ class WebToPDFConverter:
     async def _ensure_browser(self) -> Browser:
         """确保浏览器已启动"""
         if self._browser is None:
+            # ===== 本地 Chrome 支持（禁止下载 Playwright 浏览器）=====
+            CHROME_PATH = os.environ.get("CHROME_EXECUTABLE_PATH", r"D:\Tools\360Chrome\360chromex.exe")
+            if os.path.exists(CHROME_PATH):
+                self.browser_type = "chromium"
             self._playwright = await async_playwright().start()
+            launch_kwargs = {"headless": self.headless}
+            if self.browser_type == "chromium" and os.path.exists(CHROME_PATH):
+                launch_kwargs["executable_path"] = CHROME_PATH
             if self.browser_type == "chromium":
-                self._browser = await self._playwright.chromium.launch(headless=self.headless)
+                self._browser = await self._playwright.chromium.launch(**launch_kwargs)
             elif self.browser_type == "firefox":
                 self._browser = await self._playwright.firefox.launch(headless=self.headless)
             elif self.browser_type == "webkit":

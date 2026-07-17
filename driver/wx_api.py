@@ -72,14 +72,12 @@ class WeChatAPI:
      
     def get_qr_code(self, callback: Optional[Callable] = None, notice: Optional[Callable] = None) -> Dict[str, Any]:
         """
-        获取登录二维码
-        
-        Args:
-            callback: 登录成功后的回调函数
-            notice: 通知回调函数
-            
-        Returns:
-            包含二维码信息的字典
+        获取登录二维码（浏览器方式）
+
+        微信公众平台当前登录页为 Vue 单页应用，二维码由前端 JS 动态生成
+        （open.weixin.qq.com 的 XRC 本地通道机制），无法通过 requests 静态抓取。
+        故改用可见浏览器(本地360Chrome)渲染页面，截取
+        .login__type__container__scan__qrcode 处的真实二维码，并在用户扫码后捕获登录态。
         """
         self.__init__()
         if self.check_lock():
@@ -89,46 +87,97 @@ class WeChatAPI:
                 'is_exists': False,
                 'msg': '微信公众平台登录脚本正在运行，请勿重复运行'
             }
-        with self._lock:
-            self.login_callback = callback
-            self.notice_callback = notice
-            
+        self.login_callback = callback
+        self.notice_callback = notice
+        try:
+            import asyncio
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            return loop.run_until_complete(self._browser_auth())
+        except Exception as e:
+            logger.error(f"获取二维码失败: {str(e)}")
+            return {
+                'code': None,
+                'is_exists': False,
+                'msg': f'获取二维码失败: {str(e)}'
+            }
+
+    async def _browser_auth(self) -> Dict[str, Any]:
+        """使用可见浏览器渲染登录页、截取二维码并在扫码后保存会话"""
+        from driver.playwright_driver import PlaywrightController
+        from driver.store import Store
+        from driver.cookies import expire
+        controller = PlaywrightController(headless=False)
+        try:
+            await controller.start_browser()
+            await controller.open_url(self.base_url + "/")
+            page = controller.page
+            qr = page.locator(".login__type__container__scan__qrcode")
+            await qr.wait_for(state="visible", timeout=30000)
+            await asyncio.sleep(2)  # 等待 Vue 加载真实二维码图片
+            await qr.screenshot(path=self.qr_code_path)
+            self.set_lock()
+            if self.notice_callback is not None:
+                try:
+                    self.notice_callback()
+                except Exception:
+                    pass
+            # 等待用户扫码并跳转到已登录主页
             try:
-                # 获取登录页面
-                response = self.session.get(self.login_url)
-                response.raise_for_status()
-                
-                # 解析页面获取二维码相关信息
-                qr_info = self._extract_qr_info(response.text)
-                
-                if qr_info:
-                    # 生成二维码图片
-                    self._generate_qr_image(qr_info['qr_url'])
-                    self.set_lock()
-                    # 启动登录状态检查
-                    self._start_login_check(qr_info['uuid'])
-                    if  self.notice_callback is not None:
-                        self.notice_callback()
-                    return {
-                        'code': f"{self.qr_code_path}?t={int(time.time())}",
-                        'is_exists': os.path.exists(self.qr_code_path),
-                        'uuid': qr_info['uuid'],
-                        'msg': '请使用微信扫描二维码登录'
-                    }
-                else:
-                    return {
-                        'code': None,
-                        'is_exists': False,
-                        'msg': '获取二维码失败'
-                    }
-                    
+                await page.wait_for_event(
+                    "framenavigated",
+                    lambda f: "cgi-bin/home" in f.url,
+                    timeout=5 * 60 * 1000,
+                )
+            except Exception:
+                logger.warning("扫码等待超时")
+                return {'code': None, 'is_exists': False, 'msg': '扫码超时，请重试'}
+
+            # 登录成功：捕获 cookie 与 token
+            self._islogin = True
+            cookies = await controller.get_cookies()
+            token = None
+            m = re.search(r"token=([^&]+)", page.url)
+            if m:
+                token = m.group(1)
+            try:
+                Store.save(cookies)
             except Exception as e:
-                logger.error(f"获取二维码失败: {str(e)}")
-                return {
-                    'code': None,
-                    'is_exists': False,
-                    'msg': f'获取二维码失败: {str(e)}'
-                }
+                logger.error(f"保存 cookie 失败: {str(e)}")
+            if token:
+                try:
+                    cookie_expiry = expire(cookies) if cookies else None
+                    session = {
+                        'cookies': cookies,
+                        'cookies_str': "; ".join(f"{c['name']}={c['value']}" for c in cookies),
+                        'token': token,
+                        'wx_login_url': self.qr_code_path,
+                        'expiry': cookie_expiry,
+                    }
+                    set_token(session, None)
+                except Exception as e:
+                    logger.error(f"设置 token 失败: {str(e)}")
+            # 删除二维码文件，使 HasLogin() 返回 True
+            try:
+                if os.path.exists(self.qr_code_path):
+                    os.remove(self.qr_code_path)
+            except Exception:
+                pass
+            if self.login_callback is not None:
+                try:
+                    self.login_callback()
+                except Exception:
+                    pass
+            return {
+                'code': f"{self.qr_code_path}?t={int(time.time())}",
+                'is_exists': True,
+                'msg': '登录成功'
+            }
+        finally:
+            try:
+                await controller.close()
+            except Exception:
+                pass
 
     def _extract_qr_info(self, html_content: str) -> Optional[Dict[str, str]]:
         """
