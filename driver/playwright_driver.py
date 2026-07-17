@@ -18,6 +18,7 @@ if sys.platform == 'win32':
 
 from core.print import print_error, print_info, print_warning
 from driver.anti_crawler_config import AntiCrawlerConfig
+from driver.chrome_path import get_chrome_executable_path
 
 @dataclass
 class Metrics:
@@ -125,11 +126,12 @@ class PlaywrightController:
             # 启动 Playwright
             self._playwright = await async_playwright().start()
 
-            # ===== 本地 Chrome 支持（禁止下载 Playwright 浏览器）=====
-            # 若本机存在指定 Chrome 可执行文件，则强制使用 chromium 类型并走 executable_path，
-            # 从而完全绕开 `playwright install` 的浏览器下载。
-            CHROME_PATH = os.environ.get("CHROME_EXECUTABLE_PATH", r"D:\Tools\360Chrome\360chromex.exe")
-            if os.path.exists(CHROME_PATH):
+            # ===== 本地 Chrome 支持（可选，避免强制 playwright install 下载浏览器）=====
+            # 仅当通过环境变量 CHROME_EXECUTABLE_PATH 显式指定（或自动发现到本机标准安装的
+            # Chromium 内核浏览器）时才启用；否则保持上游默认浏览器（默认 webkit，由 Playwright 自带），
+            # 跨平台可移植，Docker/Linux 默认行为不受影响。
+            CHROME_PATH = get_chrome_executable_path()
+            if CHROME_PATH:
                 self.browser_type = "chromium"
                 print_info(f"使用本地 Chrome: {CHROME_PATH}（跳过 Playwright 浏览器下载）")
 
@@ -153,7 +155,7 @@ class PlaywrightController:
                     "--no-sandbox",
                 ]
                 # 使用本地 Chrome 可执行文件，避免下载 Playwright 浏览器
-                if os.path.exists(CHROME_PATH):
+                if CHROME_PATH:
                     launch_options["executable_path"] = CHROME_PATH
 
             # 添加代理
